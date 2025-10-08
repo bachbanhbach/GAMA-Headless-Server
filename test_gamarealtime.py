@@ -1,4 +1,3 @@
-# gama_headless_simple.py
 # pip install websockets
 import asyncio
 import json
