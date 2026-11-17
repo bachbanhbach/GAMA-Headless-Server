@@ -55,7 +55,8 @@ global {
 	// Set via experiment parameters before simulation starts.
 	int NUM_PENS <- 5;
 	int PENS_PER_ROW <- 5;
-	int initial_infected_pen <- 1;       // Pen that starts with disease (1-indexed)
+	string initial_infected_pen_str <- "1";  // Box input for Initial Infected Pen (1-50, <= NUM_PENS)
+	int initial_infected_pen <- 1;           // Validated integer pen that starts with disease (1-indexed)
 
 	// ==================== DYNAMIC LAYOUT ====================
 	int num_cols <- 1;
@@ -77,6 +78,7 @@ global {
 
 	// ==================== SELECTION STATE ====================
 	agent selected_pen <- nil;
+	int selected_pen_id <- 1;
 
 	// ==================== CAMERA SETTINGS ====================
 	// Overview camera (shows all pens up to 50 pens)
@@ -97,19 +99,58 @@ global {
 
 	// ==================== INITIALIZATION ====================
 	init {
-		// Do NOT auto-initialize. Wait for user to click "Set Configuration".
-		// Just set a reasonable environment so the displays can render.
-		ENV_WIDTH <- 600.0;
-		ENV_HEIGHT <- 400.0;
-		shape <- rectangle(ENV_WIDTH, ENV_HEIGHT);
-		overview_cam_x <- ENV_WIDTH / 2.0;
-		overview_cam_y <- ENV_HEIGHT / 2.0;
-		overview_cam_z <- max(ENV_WIDTH * 1.7, ENV_HEIGHT * 1.5);
-		overview_cam_dynamic <- true;
-		detail_cam_x <- ENV_WIDTH / 2.0;
-		detail_cam_y <- ENV_HEIGHT / 2.0;
-		detail_cam_z <- 130.0;
-		detail_cam_dynamic <- true;
+		// Auto-initialize with default parameters so all displays and charts have data at cycle 0.
+		// User can still change parameters on the left panel and click "Set Configuration" anytime.
+		do setup_farm;
+	}
+
+
+	// ==================== VALIDATE INITIAL INFECTED PEN INPUT ====================
+	/**
+	 * Validates the box input for Initial Infected Pen (1-50).
+	 * - Rejects any non-digit characters (letters, decimals, negative signs, symbols).
+	 * - Rejects numbers outside 1..50.
+	 * - Rejects numbers greater than the selected Number of Pens (NUM_PENS).
+	 */
+	bool validate_initial_infected_pen (bool check_empty) {
+		string raw <- initial_infected_pen_str;
+		int len <- length(raw);
+
+		if (len = 0) {
+			if (check_empty) {
+				do tell("Invalid input! Initial Infected Pen cannot be empty.\nPlease enter an integer from 1 to " + NUM_PENS + ".");
+			}
+			return false;
+		}
+
+		list<string> valid_digits <- ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+		bool only_digits <- true;
+		loop idx from: 0 to: len - 1 {
+			string ch <- copy_between(raw, idx, idx + 1);
+			if (!(ch in valid_digits)) {
+				only_digits <- false;
+				break;
+			}
+		}
+
+		if (!only_digits) {
+			do tell("Invalid input: '" + raw + "'!\nPlease enter an integer number only (from 1 to " + NUM_PENS + ").");
+			return false;
+		}
+
+		int val <- int(raw);
+		if (val < 1 or val > 50) {
+			do tell("Invalid input: " + val + "!\nInitial Infected Pen must be an integer between 1 and 50. Please enter again.");
+			return false;
+		}
+
+		if (val > NUM_PENS) {
+			do tell("Invalid input: " + val + "!\nInitial Infected Pen cannot be greater than Number of Pens (" + NUM_PENS + ").\nPlease enter an integer from 1 to " + NUM_PENS + ".");
+			return false;
+		}
+
+		initial_infected_pen <- val;
+		return true;
 	}
 
 
@@ -119,6 +160,11 @@ global {
 	 * Destroys all existing agents and re-creates the farm with current parameters.
 	 */
 	action setup_farm {
+		// --- Validate Initial Infected Pen input before building farm ---
+		if (!validate_initial_infected_pen(true)) {
+			return;
+		}
+
 		// --- Destroy existing agents ---
 		ask FarmPig { do die; }
 		ask PenTrough { do die; }
@@ -201,6 +247,8 @@ global {
 				}
 				this_pen.my_pigs <- this_pen.my_pigs + new_pig;
 			}
+			this_pen.pig_count <- length(this_pen.my_pigs);
+			this_pen.total_weight <- this_pen.my_pigs sum_of (each.weight);
 
 			// 5 troughs per pen — positions match background.png
 			loop j from: 0 to: 4 {
@@ -284,13 +332,75 @@ global {
 		overview_cam_z <- max(ENV_WIDTH * 1.7, ENV_HEIGHT * 1.5);
 		overview_cam_dynamic <- true;
 
-		// --- Detail camera position ---
-		detail_cam_x <- ENV_WIDTH / 2.0;
-		detail_cam_y <- ENV_HEIGHT / 2.0;
+		// --- Select Pen 1 by default so Detail & SelectedPenStats charts display immediately ---
+		if (!empty(PigPen)) {
+			int target_idx <- min(max(selected_pen_id - 1, 0), length(PigPen) - 1);
+			selected_pen <- PigPen[target_idx];
+			selected_pen_id <- PigPen[target_idx].pen_id;
+			detail_cam_x <- PigPen[target_idx].location.x;
+			detail_cam_y <- PigPen[target_idx].location.y;
+		} else {
+			selected_pen <- nil;
+			detail_cam_x <- ENV_WIDTH / 2.0;
+			detail_cam_y <- ENV_HEIGHT / 2.0;
+		}
 		detail_cam_z <- 130.0;
 		detail_cam_dynamic <- true;
 
 		farm_initialized <- true;
+	}
+
+	action select_pen_by_id (int pid) {
+		if (!empty(PigPen)) {
+			int clamped_id <- min(max(pid, 1), length(PigPen));
+			selected_pen_id <- clamped_id;
+			PigPen p <- PigPen[clamped_id - 1];
+			selected_pen <- p;
+			detail_cam_x <- p.location.x;
+			detail_cam_y <- p.location.y;
+			detail_cam_z <- 130.0;
+			detail_cam_dynamic <- true;
+		}
+	}
+
+
+	// ==================== CHART DATA HELPERS ====================
+	list<string> get_pen_labels {
+		if (empty(PigPen)) { return ["Pen 1"]; }
+		return PigPen collect ("Pen " + each.pen_id);
+	}
+
+	list<float> get_pen_avg_weights {
+		if (empty(PigPen)) { return [50.0]; }
+		return PigPen collect ((each.pig_count > 0) ? (each.total_weight / each.pig_count) : 50.0);
+	}
+
+	PigPen get_active_pen {
+		if (selected_pen != nil and !dead(selected_pen)) {
+			return PigPen(selected_pen);
+		}
+		if (!empty(PigPen)) {
+			return PigPen[0];
+		}
+		return nil;
+	}
+
+	list<string> get_selected_pen_pig_labels {
+		PigPen p <- get_active_pen();
+		if (p = nil or empty(p.my_pigs)) { return ["Pig 1"]; }
+		return p.my_pigs collect ("Pig " + ((each.id mod 20) + 1));
+	}
+
+	list<float> get_selected_pen_pig_cfis {
+		PigPen p <- get_active_pen();
+		if (p = nil or empty(p.my_pigs)) { return [0.0]; }
+		return p.my_pigs collect (each.cfi);
+	}
+
+	list<float> get_selected_pen_pig_weights {
+		PigPen p <- get_active_pen();
+		if (p = nil or empty(p.my_pigs)) { return [50.0]; }
+		return p.my_pigs collect (each.weight);
 	}
 
 
@@ -816,15 +926,32 @@ species PenTrough parent: Trough {
 experiment TwoLayerFarm type: gui {
 
 	// ==================== PRE-SIMULATION PARAMETERS ====================
-	parameter "Number of Pens (1-50)" var: NUM_PENS min: 1 max: 50 init: 5 category: "Farm Setup";
+	parameter "Number of Pens (1-50)" var: NUM_PENS min: 1 max: 50 init: 5 category: "Farm Setup" on_change: {
+		ask simulation {
+			if (length(initial_infected_pen_str) > 0) {
+				bool ok <- validate_initial_infected_pen(false);
+			}
+		}
+	};
 	parameter "Pens per Row (1-10)" var: PENS_PER_ROW min: 1 max: 10 init: 5 category: "Farm Setup";
-	parameter "Initial Infected Pen (1-50)" var: initial_infected_pen min: 1 max: 50 init: 1 category: "Disease Settings";
+	parameter "Inspect Pen ID (1-50)" var: selected_pen_id min: 1 max: 50 init: 1 category: "Farm Setup" on_change: {
+		ask simulation {
+			do select_pen_by_id(selected_pen_id);
+		}
+		do update_outputs;
+	};
+	parameter "Initial Infected Pen (1-50)" var: initial_infected_pen_str init: "1" category: "Disease Settings" on_change: {
+		ask simulation {
+			bool ok <- validate_initial_infected_pen(false);
+		}
+	};
 
 	// ==================== SET CONFIGURATION BUTTON ====================
 	user_command "Set Configuration" {
 		ask simulation {
 			do setup_farm;
 		}
+		do update_outputs;
 	}
 
 	// ==================== MOUSE CLICK HANDLER ====================
@@ -835,6 +962,7 @@ experiment TwoLayerFarm type: gui {
 			if (loc.x >= origin.x and loc.x <= origin.x + PEN_WIDTH
 				and loc.y >= origin.y and loc.y <= origin.y + PEN_HEIGHT) {
 				selected_pen <- pen;
+				selected_pen_id <- pen.pen_id;
 				// Jump camera to selected pen, then unlock for manual mouse zoom
 				detail_cam_x <- pen.location.x;
 				detail_cam_y <- pen.location.y;
@@ -843,10 +971,18 @@ experiment TwoLayerFarm type: gui {
 				break;
 			}
 		}
+		do update_outputs;
 	}
 
 	output {
-		layout horizontal([0::5000, 1::5000]) tabs: false;
+		layout horizontal([
+			vertical([0::5500, 1::4500])::5000,
+			vertical([
+				horizontal([2::5000, 3::5000])::3400,
+				horizontal([4::5000, 5::5000])::3300,
+				horizontal([6::5000, 7::5000])::3300
+			])::5000
+		]) tabs: true;
 
 
 		// ==================== LAYER 1: FARM OVERVIEW ====================
@@ -1015,6 +1151,66 @@ experiment TwoLayerFarm type: gui {
 					draw "No pen selected"
 						 at: {10, 25} color: rgb(100, 115, 135) font: font("Arial", 12, #plain);
 				}
+			}
+		}
+
+
+		// ==================== CHART 1: AVERAGE WEIGHT PER PEN ====================
+		display AvgWeightPerPen name: "AvgWeightPerPen" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "Average Weight per Pen (kg)" type: histogram {
+				datalist legend: get_pen_labels() value: get_pen_avg_weights();
+			}
+		}
+
+
+		// ==================== CHART 2: SELECTED PEN STATS (CFI & WEIGHT OF 20 PIGS) ====================
+		display SelectedPenStats name: "SelectedPenStats" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "Selected Pen - Cumulative Feed Intake (CFI) of 20 Pigs" type: series position: {0.0, 0.0} size: {1.0, 0.5} {
+				datalist legend: get_selected_pen_pig_labels() value: get_selected_pen_pig_cfis();
+			}
+
+			chart "Selected Pen - Body Weight (kg) of 20 Pigs" type: series position: {0.0, 0.5} size: {1.0, 0.5} {
+				datalist legend: get_selected_pen_pig_labels() value: get_selected_pen_pig_weights();
+			}
+		}
+
+
+		// ==================== CHART 3: CFI vs TARGET CFI (PIG 0) ====================
+		display CFIPig0 name: "CFIPig0" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "CFI vs Target CFI (First Pig)" type: series {
+				data "CFI" value: (!empty(FarmPig) ? FarmPig[0].cfi : 0.0) color: #dodgerblue;
+				data "Target CFI" value: (!empty(FarmPig) ? FarmPig[0].target_cfi : 0.0) color: #limegreen;
+			}
+		}
+
+
+		// ==================== CHART 4: DFI vs TARGET DFI (PIG 0) ====================
+		display DFIPig0 name: "DFIPig0" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "DFI vs Target DFI (First Pig)" type: series {
+				data "DFI" value: (!empty(FarmPig) ? FarmPig[0].dfi : 0.0) color: #dodgerblue;
+				data "Target DFI" value: (!empty(FarmPig) ? FarmPig[0].target_dfi : 0.0) color: #orange;
+			}
+		}
+
+
+		// ==================== CHART 5: SEIR EPIDEMIC PROGRESSION ====================
+		display SEIR_Epidemic name: "SEIR Epidemic" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "Farm-Wide SEIR Disease Progression" type: series {
+				data "Susceptible (S)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 0)) : 0) color: #dodgerblue;
+				data "Exposed (E)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 1)) : 0) color: #orange;
+				data "Infected (I)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 2)) : 0) color: #red;
+				data "Recovered (R)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 3)) : 0) color: #limegreen;
+				data "Dead (D)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 4)) : 0) color: #gray;
+			}
+		}
+
+
+		// ==================== CHART 6: PEN & FARMER INFECTION STATS ====================
+		display PenAndFarmerStats name: "Pen & Farmer Stats" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "Infected Pens & Farmer Carrier Status" type: series {
+				data "Infected Pens (E or I > 0)" value: (!empty(PigPen) ? (PigPen count (each.exposed_count > 0 or each.infected_count > 0)) : 0) color: #crimson;
+				data "Recovered Pens (R > 0)" value: (!empty(PigPen) ? (PigPen count (each.recovered_count > 0)) : 0) color: #seagreen;
+				data "Farmer Carrier (1=Yes, 0=No)" value: (!empty(Farmer) and Farmer[0].has_pathogen ? 1 : 0) color: #darkorange;
 			}
 		}
 	}
