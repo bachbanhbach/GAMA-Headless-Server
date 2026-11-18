@@ -1,7 +1,7 @@
 /**
  * Name: TwoLayerFarm
  * Description: OOP pig farm simulation with config-driven grid layout.
- *
+ * Author: Pham Gia Bach
  * Key features:
  *   - Pre-simulation parameter panel: NUM_PENS, PENS_PER_ROW, disease config
  *   - "Set Configuration" button to apply changes without restarting
@@ -44,18 +44,19 @@ global {
 	float ROW_GAP <- 45.0;       // Vertical gap between pen rows (for stats text)
 
 	// ==================== IMAGE ASSETS (CACHED) ====================
-	file pen_bg_img <- image_file("../includes/images/background.png");
-	file pig_img <- image_file("../includes/images/pig.png");
-	file pig_yellow_img <- image_file("../includes/images/pig_yellow.png");
-	file pig_red_img <- image_file("../includes/images/pig_red.png");
-	file pig_green_img <- image_file("../includes/images/pig_green.png");
-	file farmer_img <- image_file("../includes/images/farmer.png");
+	image_file pen_bg_img <- image_file("../includes/images/background.png");
+	image_file pig_img <- image_file("../includes/images/pig.png");
+	image_file pig_yellow_img <- image_file("../includes/images/pig_yellow.png");
+	image_file pig_red_img <- image_file("../includes/images/pig_red.png");
+	image_file pig_green_img <- image_file("../includes/images/pig_green.png");
+	image_file farmer_img <- image_file("../includes/images/farmer.png");
 
 	// ==================== USER CONFIGURATION ====================
 	// Set via experiment parameters before simulation starts.
 	int NUM_PENS <- 5;
 	int PENS_PER_ROW <- 5;
-	int initial_infected_pen <- 1;       // Pen that starts with disease (1-indexed)
+	string initial_infected_pen_str <- "1";  // Box input for Initial Infected Pen (1-50, <= NUM_PENS)
+	int initial_infected_pen <- 1;           // Validated integer pen that starts with disease (1-indexed)
 
 	// ==================== DYNAMIC LAYOUT ====================
 	int num_cols <- 1;
@@ -63,6 +64,11 @@ global {
 	list<string> PEN_TYPES <- [];
 	list<int> PEN_FOOD_DISEASE_DAYS <- [];
 	list<point> PEN_ORIGINS <- [];
+	
+	// --- WAYPOINT NAVIGATION CHO FARMER ---
+	list<point> patrol_points <- []; // Tọa độ các điểm farmer sẽ đi qua
+	list<int> patrol_pens <- [];     // ID của chuồng tương ứng để cho ăn (-1 nếu chỉ là điểm rẽ)
+	
 	float ENV_WIDTH <- 600.0;
 	float ENV_HEIGHT <- 200.0;
 	geometry shape <- rectangle(600, 200);
@@ -72,6 +78,7 @@ global {
 
 	// ==================== SELECTION STATE ====================
 	agent selected_pen <- nil;
+	int selected_pen_id <- 1;
 
 	// ==================== CAMERA SETTINGS ====================
 	// Overview camera (shows all pens up to 50 pens)
@@ -92,19 +99,58 @@ global {
 
 	// ==================== INITIALIZATION ====================
 	init {
-		// Do NOT auto-initialize. Wait for user to click "Set Configuration".
-		// Just set a reasonable environment so the displays can render.
-		ENV_WIDTH <- 600.0;
-		ENV_HEIGHT <- 400.0;
-		shape <- rectangle(ENV_WIDTH, ENV_HEIGHT);
-		overview_cam_x <- ENV_WIDTH / 2.0;
-		overview_cam_y <- ENV_HEIGHT / 2.0;
-		overview_cam_z <- max(ENV_WIDTH * 1.7, ENV_HEIGHT * 1.5);
-		overview_cam_dynamic <- true;
-		detail_cam_x <- ENV_WIDTH / 2.0;
-		detail_cam_y <- ENV_HEIGHT / 2.0;
-		detail_cam_z <- 130.0;
-		detail_cam_dynamic <- true;
+		// Auto-initialize with default parameters so all displays and charts have data at cycle 0.
+		// User can still change parameters on the left panel and click "Set Configuration" anytime.
+		do setup_farm;
+	}
+
+
+	// ==================== VALIDATE INITIAL INFECTED PEN INPUT ====================
+	/**
+	 * Validates the box input for Initial Infected Pen (1-50).
+	 * - Rejects any non-digit characters (letters, decimals, negative signs, symbols).
+	 * - Rejects numbers outside 1..50.
+	 * - Rejects numbers greater than the selected Number of Pens (NUM_PENS).
+	 */
+	bool validate_initial_infected_pen (bool check_empty) {
+		string raw <- initial_infected_pen_str;
+		int len <- length(raw);
+
+		if (len = 0) {
+			if (check_empty) {
+				do tell("Invalid input! Initial Infected Pen cannot be empty.\nPlease enter an integer from 1 to " + NUM_PENS + ".");
+			}
+			return false;
+		}
+
+		list<string> valid_digits <- ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+		bool only_digits <- true;
+		loop idx from: 0 to: len - 1 {
+			string ch <- copy_between(raw, idx, idx + 1);
+			if (!(ch in valid_digits)) {
+				only_digits <- false;
+				break;
+			}
+		}
+
+		if (!only_digits) {
+			do tell("Invalid input: '" + raw + "'!\nPlease enter an integer number only (from 1 to " + NUM_PENS + ").");
+			return false;
+		}
+
+		int val <- int(raw);
+		if (val < 1 or val > 50) {
+			do tell("Invalid input: " + val + "!\nInitial Infected Pen must be an integer between 1 and 50. Please enter again.");
+			return false;
+		}
+
+		if (val > NUM_PENS) {
+			do tell("Invalid input: " + val + "!\nInitial Infected Pen cannot be greater than Number of Pens (" + NUM_PENS + ").\nPlease enter an integer from 1 to " + NUM_PENS + ".");
+			return false;
+		}
+
+		initial_infected_pen <- val;
+		return true;
 	}
 
 
@@ -114,6 +160,11 @@ global {
 	 * Destroys all existing agents and re-creates the farm with current parameters.
 	 */
 	action setup_farm {
+		// --- Validate Initial Infected Pen input before building farm ---
+		if (!validate_initial_infected_pen(true)) {
+			return;
+		}
+
 		// --- Destroy existing agents ---
 		ask FarmPig { do die; }
 		ask PenTrough { do die; }
@@ -196,6 +247,8 @@ global {
 				}
 				this_pen.my_pigs <- this_pen.my_pigs + new_pig;
 			}
+			this_pen.pig_count <- length(this_pen.my_pigs);
+			this_pen.total_weight <- this_pen.my_pigs sum_of (each.weight);
 
 			// 5 troughs per pen — positions match background.png
 			loop j from: 0 to: 4 {
@@ -206,13 +259,70 @@ global {
 			}
 		}
 
+		// --- GENERATE PRECISE WAYPOINTS CHO FARMER (HÀNH LANG NGOÀI) ---
+		patrol_points <- [];
+		patrol_pens <- [];
+		
+		loop row from: 0 to: num_rows - 1 {
+			bool left_to_right <- (row mod 2 = 0);
+			int start_col <- left_to_right ? 0 : (PENS_PER_ROW - 1);
+			int end_col <- left_to_right ? (PENS_PER_ROW - 1) : 0;
+			int step <- left_to_right ? 1 : -1;
+			
+			// Tính toán cho hàng cuối cùng (có thể không đủ số chuồng)
+			if (!left_to_right and row = num_rows - 1) {
+				int max_col_this_row <- (NUM_PENS - 1) mod PENS_PER_ROW;
+				start_col <- min(start_col, max_col_this_row);
+			}
+			if (left_to_right and row = num_rows - 1) {
+				int max_col_this_row <- (NUM_PENS - 1) mod PENS_PER_ROW;
+				end_col <- min(end_col, max_col_this_row);
+			}
+
+			// Thêm các điểm cho ăn tại từng chuồng (Y = -12.0 là đứng ngoài rìa trên)
+			int c <- start_col;
+			bool row_done <- false;
+			
+			loop while: !row_done {
+				int pen_idx <- row * PENS_PER_ROW + c;
+				
+				point feed_pt <- PEN_ORIGINS[pen_idx] + {PEN_WIDTH / 2.0, -12.0};
+				patrol_points <+ feed_pt;
+				patrol_pens <+ pen_idx;
+				
+				if (c = end_col) {
+					row_done <- true;
+				} else {
+					c <- c + step;
+				}
+			}
+			
+			// Thêm điểm rẽ góc để vòng xuống hàng dưới một cách an toàn
+			if (row < num_rows - 1) {
+				int current_pen_idx <- row * PENS_PER_ROW + c;
+				float edge_offset_x <- left_to_right ? (PEN_WIDTH + 15.0) : -15.0;
+				
+				// Corner 1: Đi ngang ra khỏi hàng
+				point corner1 <- PEN_ORIGINS[current_pen_idx] + {edge_offset_x, -12.0};
+				// Corner 2: Đi thẳng dọc xuống hành lang hàng tiếp theo
+				point origin_next_row <- PEN_ORIGINS[(row + 1) * PENS_PER_ROW];
+				point corner2 <- {corner1.x, origin_next_row.y - 12.0};
+				
+				patrol_points <+ corner1;
+				patrol_pens <+ -1; // -1 = Không cho ăn, chỉ là điểm rẽ
+				patrol_points <+ corner2;
+				patrol_pens <+ -1;
+			}
+		}
+
 		// --- Create Caretaker / Farmer agent ---
 		create Farmer number: 1 {
-			current_pen_idx <- 0;
+			path_index <- 0;
+			current_pen_idx <- patrol_pens[0];
 			moving_forward <- true;
 			state <- "moving";
 			has_pathogen <- false;
-			location <- PEN_ORIGINS[0] + {68.0, 15.0};
+			location <- patrol_points[0]; // Bắt đầu từ tọa độ ngoài chuồng đầu tiên
 			target_loc <- location;
 		}
 
@@ -222,13 +332,75 @@ global {
 		overview_cam_z <- max(ENV_WIDTH * 1.7, ENV_HEIGHT * 1.5);
 		overview_cam_dynamic <- true;
 
-		// --- Detail camera position ---
-		detail_cam_x <- ENV_WIDTH / 2.0;
-		detail_cam_y <- ENV_HEIGHT / 2.0;
+		// --- Select Pen 1 by default so Detail & SelectedPenStats charts display immediately ---
+		if (!empty(PigPen)) {
+			int target_idx <- min(max(selected_pen_id - 1, 0), length(PigPen) - 1);
+			selected_pen <- PigPen[target_idx];
+			selected_pen_id <- PigPen[target_idx].pen_id;
+			detail_cam_x <- PigPen[target_idx].location.x;
+			detail_cam_y <- PigPen[target_idx].location.y;
+		} else {
+			selected_pen <- nil;
+			detail_cam_x <- ENV_WIDTH / 2.0;
+			detail_cam_y <- ENV_HEIGHT / 2.0;
+		}
 		detail_cam_z <- 130.0;
 		detail_cam_dynamic <- true;
 
 		farm_initialized <- true;
+	}
+
+	action select_pen_by_id (int pid) {
+		if (!empty(PigPen)) {
+			int clamped_id <- min(max(pid, 1), length(PigPen));
+			selected_pen_id <- clamped_id;
+			PigPen p <- PigPen[clamped_id - 1];
+			selected_pen <- p;
+			detail_cam_x <- p.location.x;
+			detail_cam_y <- p.location.y;
+			detail_cam_z <- 130.0;
+			detail_cam_dynamic <- true;
+		}
+	}
+
+
+	// ==================== CHART DATA HELPERS ====================
+	list<string> get_pen_labels {
+		if (empty(PigPen)) { return ["Pen 1"]; }
+		return PigPen collect ("Pen " + each.pen_id);
+	}
+
+	list<float> get_pen_avg_weights {
+		if (empty(PigPen)) { return [50.0]; }
+		return PigPen collect ((each.pig_count > 0) ? (each.total_weight / each.pig_count) : 50.0);
+	}
+
+	PigPen get_active_pen {
+		if (selected_pen != nil and !dead(selected_pen)) {
+			return PigPen(selected_pen);
+		}
+		if (!empty(PigPen)) {
+			return PigPen[0];
+		}
+		return nil;
+	}
+
+	list<string> get_selected_pen_pig_labels {
+		PigPen p <- get_active_pen();
+		if (p = nil or empty(p.my_pigs)) { return ["Pig 1"]; }
+		return p.my_pigs collect ("Pig " + ((each.id mod 20) + 1));
+	}
+
+	list<float> get_selected_pen_pig_cfis {
+		PigPen p <- get_active_pen();
+		if (p = nil or empty(p.my_pigs)) { return [0.0]; }
+		return p.my_pigs collect (each.cfi);
+	}
+
+	list<float> get_selected_pen_pig_weights {
+		PigPen p <- get_active_pen();
+		if (p = nil or empty(p.my_pigs)) { return [50.0]; }
+		return p.my_pigs collect (each.weight);
 	}
 
 
@@ -586,16 +758,10 @@ species FarmPig parent: DiseasePig {
 // =====================================================================
 /**
  * Farmer - The caretaker who feeds the pigs and serves as the disease transmission vector.
- * 
- * Behaviors:
- *   - Patrols pens in order: row by row from top to bottom (0 -> NUM_PENS - 1), then returns (NUM_PENS - 1 -> 0).
- *   - Stops at each pen at the feeding station (near troughs) for FEED_DURATION cycles.
- *   - If the visited pen has sick pigs (exposed or infected), the farmer can get contaminated (carrying pathogen).
- *   - If the farmer is contaminated and visits a healthy pen, the farmer can transmit the disease to that pen.
- *   - Visualization: farmer sprite with green aura (clean) or red pulsing aura (carrier/contaminated).
  */
 species Farmer {
-	int current_pen_idx <- 0;
+	int path_index <- 0;
+	int current_pen_idx <- 0;           // Update ID for UI and Interaction
 	bool moving_forward <- true;
 	string state <- "moving";           // "moving" or "feeding"
 	int feed_timer <- 0;
@@ -604,40 +770,51 @@ species Farmer {
 	bool has_pathogen <- false;         // True if carrying pathogen from an infected pen
 	point target_loc <- {0, 0};
 
-	reflex patrol when: farm_initialized and length(PEN_ORIGINS) > 0 {
+	reflex patrol when: farm_initialized and length(patrol_points) > 0 {
 		if (state = "moving") {
-			target_loc <- PEN_ORIGINS[current_pen_idx] + {68.0, 15.0};
+			target_loc <- patrol_points[path_index];
 			float dist <- distance_to(location, target_loc);
+			
 			if (dist <= move_speed or dist = 0.0) {
 				location <- target_loc;
-				state <- "feeding";
-				feed_timer <- FEED_DURATION;
 				
-				// --- Interaction with current pen on arrival ---
-				do interact_with_pen;
+				int associated_pen <- patrol_pens[path_index];
+				if (associated_pen != -1) {
+					current_pen_idx <- associated_pen; // Cập nhật pen_id hiện tại đang đứng cho ăn
+					state <- "feeding";
+					feed_timer <- FEED_DURATION;
+					do interact_with_pen;
+				} else {
+					// Nếu là -1 tức là đang ở góc rẽ, đi tiếp ngay lập tức
+					do advance_path;
+				}
 			} else {
 				location <- location + {(target_loc.x - location.x) * (move_speed / dist), (target_loc.y - location.y) * (move_speed / dist)};
 			}
 		} else if (state = "feeding") {
 			feed_timer <- feed_timer - 1;
 			if (feed_timer <= 0) {
-				// Finished feeding at current pen -> advance to next pen
+				// Xong chuồng này thì tiến tới waypoint tiếp theo
+				do advance_path;
 				state <- "moving";
-				if (moving_forward) {
-					if (current_pen_idx >= NUM_PENS - 1) {
-						moving_forward <- false;
-						current_pen_idx <- max(0, NUM_PENS - 2);
-					} else {
-						current_pen_idx <- current_pen_idx + 1;
-					}
-				} else {
-					if (current_pen_idx <= 0) {
-						moving_forward <- true;
-						current_pen_idx <- min(1, NUM_PENS - 1);
-					} else {
-						current_pen_idx <- current_pen_idx - 1;
-					}
-				}
+			}
+		}
+	}
+
+	action advance_path {
+		if (moving_forward) {
+			if (path_index >= length(patrol_points) - 1) {
+				moving_forward <- false;
+				path_index <- max(0, length(patrol_points) - 2);
+			} else {
+				path_index <- path_index + 1;
+			}
+		} else {
+			if (path_index <= 0) {
+				moving_forward <- true;
+				path_index <- min(1, length(patrol_points) - 1);
+			} else {
+				path_index <- path_index - 1;
 			}
 		}
 	}
@@ -749,15 +926,32 @@ species PenTrough parent: Trough {
 experiment TwoLayerFarm type: gui {
 
 	// ==================== PRE-SIMULATION PARAMETERS ====================
-	parameter "Number of Pens (1-50)" var: NUM_PENS min: 1 max: 50 init: 5 category: "Farm Setup";
+	parameter "Number of Pens (1-50)" var: NUM_PENS min: 1 max: 50 init: 5 category: "Farm Setup" on_change: {
+		ask simulation {
+			if (length(initial_infected_pen_str) > 0) {
+				bool ok <- validate_initial_infected_pen(false);
+			}
+		}
+	};
 	parameter "Pens per Row (1-10)" var: PENS_PER_ROW min: 1 max: 10 init: 5 category: "Farm Setup";
-	parameter "Initial Infected Pen (1-50)" var: initial_infected_pen min: 1 max: 50 init: 1 category: "Disease Settings";
+	parameter "Inspect Pen ID (1-50)" var: selected_pen_id min: 1 max: 50 init: 1 category: "Farm Setup" on_change: {
+		ask simulation {
+			do select_pen_by_id(selected_pen_id);
+		}
+		do update_outputs;
+	};
+	parameter "Initial Infected Pen (1-50)" var: initial_infected_pen_str init: "1" category: "Disease Settings" on_change: {
+		ask simulation {
+			bool ok <- validate_initial_infected_pen(false);
+		}
+	};
 
 	// ==================== SET CONFIGURATION BUTTON ====================
 	user_command "Set Configuration" {
 		ask simulation {
 			do setup_farm;
 		}
+		do update_outputs;
 	}
 
 	// ==================== MOUSE CLICK HANDLER ====================
@@ -768,6 +962,7 @@ experiment TwoLayerFarm type: gui {
 			if (loc.x >= origin.x and loc.x <= origin.x + PEN_WIDTH
 				and loc.y >= origin.y and loc.y <= origin.y + PEN_HEIGHT) {
 				selected_pen <- pen;
+				selected_pen_id <- pen.pen_id;
 				// Jump camera to selected pen, then unlock for manual mouse zoom
 				detail_cam_x <- pen.location.x;
 				detail_cam_y <- pen.location.y;
@@ -776,10 +971,18 @@ experiment TwoLayerFarm type: gui {
 				break;
 			}
 		}
+		do update_outputs;
 	}
 
 	output {
-		layout horizontal([0::5000, 1::5000]) tabs: false;
+		layout horizontal([
+			vertical([0::5500, 1::4500])::5000,
+			vertical([
+				horizontal([2::5000, 3::5000])::3400,
+				horizontal([4::5000, 5::5000])::3300,
+				horizontal([6::5000, 7::5000])::3300
+			])::5000
+		]) tabs: true;
 
 
 		// ==================== LAYER 1: FARM OVERVIEW ====================
@@ -948,6 +1151,66 @@ experiment TwoLayerFarm type: gui {
 					draw "No pen selected"
 						 at: {10, 25} color: rgb(100, 115, 135) font: font("Arial", 12, #plain);
 				}
+			}
+		}
+
+
+		// ==================== CHART 1: AVERAGE WEIGHT PER PEN ====================
+		display AvgWeightPerPen name: "AvgWeightPerPen" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "Average Weight per Pen (kg)" type: histogram {
+				datalist legend: get_pen_labels() value: get_pen_avg_weights();
+			}
+		}
+
+
+		// ==================== CHART 2: SELECTED PEN STATS (CFI & WEIGHT OF 20 PIGS) ====================
+		display SelectedPenStats name: "SelectedPenStats" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "Selected Pen - Cumulative Feed Intake (CFI) of 20 Pigs" type: series position: {0.0, 0.0} size: {1.0, 0.5} {
+				datalist legend: get_selected_pen_pig_labels() value: get_selected_pen_pig_cfis();
+			}
+
+			chart "Selected Pen - Body Weight (kg) of 20 Pigs" type: series position: {0.0, 0.5} size: {1.0, 0.5} {
+				datalist legend: get_selected_pen_pig_labels() value: get_selected_pen_pig_weights();
+			}
+		}
+
+
+		// ==================== CHART 3: CFI vs TARGET CFI (PIG 0) ====================
+		display CFIPig0 name: "CFIPig0" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "CFI vs Target CFI (First Pig)" type: series {
+				data "CFI" value: (!empty(FarmPig) ? FarmPig[0].cfi : 0.0) color: #dodgerblue;
+				data "Target CFI" value: (!empty(FarmPig) ? FarmPig[0].target_cfi : 0.0) color: #limegreen;
+			}
+		}
+
+
+		// ==================== CHART 4: DFI vs TARGET DFI (PIG 0) ====================
+		display DFIPig0 name: "DFIPig0" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "DFI vs Target DFI (First Pig)" type: series {
+				data "DFI" value: (!empty(FarmPig) ? FarmPig[0].dfi : 0.0) color: #dodgerblue;
+				data "Target DFI" value: (!empty(FarmPig) ? FarmPig[0].target_dfi : 0.0) color: #orange;
+			}
+		}
+
+
+		// ==================== CHART 5: SEIR EPIDEMIC PROGRESSION ====================
+		display SEIR_Epidemic name: "SEIR Epidemic" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "Farm-Wide SEIR Disease Progression" type: series {
+				data "Susceptible (S)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 0)) : 0) color: #dodgerblue;
+				data "Exposed (E)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 1)) : 0) color: #orange;
+				data "Infected (I)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 2)) : 0) color: #red;
+				data "Recovered (R)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 3)) : 0) color: #limegreen;
+				data "Dead (D)" value: (!empty(FarmPig) ? (FarmPig count (each.seir = 4)) : 0) color: #gray;
+			}
+		}
+
+
+		// ==================== CHART 6: PEN & FARMER INFECTION STATS ====================
+		display PenAndFarmerStats name: "Pen & Farmer Stats" type: 2d refresh: every((60 * 24)#cycles) {
+			chart "Infected Pens & Farmer Carrier Status" type: series {
+				data "Infected Pens (E or I > 0)" value: (!empty(PigPen) ? (PigPen count (each.exposed_count > 0 or each.infected_count > 0)) : 0) color: #crimson;
+				data "Recovered Pens (R > 0)" value: (!empty(PigPen) ? (PigPen count (each.recovered_count > 0)) : 0) color: #seagreen;
+				data "Farmer Carrier (1=Yes, 0=No)" value: (!empty(Farmer) and Farmer[0].has_pathogen ? 1 : 0) color: #darkorange;
 			}
 		}
 	}
