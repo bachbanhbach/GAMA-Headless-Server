@@ -232,6 +232,7 @@ global {
 				create FarmPig number: 1 returns: new_pig {
 					id <- i * 20 + j;
 					pen_id <- i + 1;
+					my_pen <- this_pen;
 					pen_offset <- origin;
 					food_disease_mode <- has_food_disease;
 					location <- get_relax_loc();
@@ -246,23 +247,19 @@ global {
 					u <- 0.4;
 					k1 <- 0.42;
 					k2 <- 1.59;
-
-					if (has_food_disease) {
-						init_weight <- rnd(47.5, 52.5) with_precision 2;
-						weight <- init_weight;
-					}
 				}
 				this_pen.my_pigs <- this_pen.my_pigs + new_pig;
 			}
 			this_pen.pig_count <- length(this_pen.my_pigs);
 			this_pen.total_weight <- this_pen.my_pigs sum_of (each.weight);
 
-			// 5 troughs per pen — positions match background.png
+			// 5 troughs per pen — positions match background.png (cached in this_pen.my_troughs)
 			loop j from: 0 to: 4 {
-				create PenTrough number: 1 {
+				create PenTrough number: 1 returns: new_trough {
 					pen_id <- i + 1;
 					location <- origin + trough_locs[j];
 				}
+				this_pen.my_troughs <- this_pen.my_troughs + new_trough;
 			}
 		}
 
@@ -378,8 +375,8 @@ global {
 	}
 
 	list<float> get_pen_avg_weights {
-		if (empty(PigPen)) { return [50.0]; }
-		return PigPen collect ((each.pig_count > 0) ? (each.total_weight / each.pig_count) : 50.0);
+		if (empty(PigPen)) { return [22.5]; }
+		return PigPen collect ((each.pig_count > 0) ? (each.total_weight / each.pig_count) : 22.5);
 	}
 
 	PigPen get_active_pen {
@@ -406,7 +403,7 @@ global {
 
 	list<float> get_selected_pen_pig_weights {
 		PigPen p <- get_active_pen();
-		if (p = nil or empty(p.my_pigs)) { return [50.0]; }
+		if (p = nil or empty(p.my_pigs)) { return [22.5]; }
 		return p.my_pigs collect (each.weight);
 	}
 
@@ -521,6 +518,8 @@ species PigPen {
 	string pen_type;
 	int food_disease_day <- -1;
 	list<FarmPig> my_pigs <- [];
+	list<PenTrough> my_troughs <- [];
+	list<FoodDiseaseFactor> my_factors <- [];
 
 	// Aggregated statistics
 	float total_weight <- 0.0;
@@ -529,12 +528,56 @@ species PigPen {
 	int infected_count <- 0;
 	int recovered_count <- 0;
 
+	// Single-pass stats aggregation (replaces 4 separate collection scans per cycle)
+	// and periodic cleanup of expired FoodDiseaseFactor references
 	reflex update_stats {
-		total_weight <- my_pigs sum_of (each.weight);
+		float w_sum <- 0.0;
+		int e_cnt <- 0;
+		int i_cnt <- 0;
+		int r_cnt <- 0;
+		loop p over: my_pigs {
+			w_sum <- w_sum + p.weight;
+			if (p.seir = 1) {
+				e_cnt <- e_cnt + 1;
+			} else if (p.seir = 2) {
+				i_cnt <- i_cnt + 1;
+			} else if (p.seir = 3) {
+				r_cnt <- r_cnt + 1;
+			}
+		}
+		total_weight <- w_sum;
 		pig_count <- length(my_pigs);
-		exposed_count <- my_pigs count (each.seir = 1);
-		infected_count <- my_pigs count (each.seir = 2);
-		recovered_count <- my_pigs count (each.seir = 3);
+		exposed_count <- e_cnt;
+		infected_count <- i_cnt;
+		recovered_count <- r_cnt;
+
+		if (!empty(my_factors) and (cycle mod 60 = 0)) {
+			my_factors <- my_factors where (!dead(each));
+		}
+	}
+
+	/**
+	 * Contaminate this pen's 5 troughs without spawning duplicate FoodDiseaseFactor agents.
+	 * If active factors already exist at this pen's troughs, refresh their duration to 7 days.
+	 */
+	action contaminate_troughs {
+		my_factors <- my_factors where (!dead(each));
+		if (!empty(my_factors)) {
+			ask my_factors {
+				duration <- 7 * 24 * 60;
+			}
+		} else {
+			point my_origin <- pen_origin;
+			loop j from: 0 to: 4 {
+				point t_loc <- my_origin + trough_locs[j];
+				create FoodDiseaseFactor number: 1 returns: new_factor {
+					duration <- 7 * 24 * 60;
+					size <- 2.0;
+					location <- t_loc;
+				}
+				my_factors <- my_factors + new_factor;
+			}
+		}
 	}
 
 	/**
@@ -543,15 +586,7 @@ species PigPen {
 	reflex trigger_food_disease when: food_disease_day >= 0
 			and cycle mod (24 * 60) = 0
 			and int(cycle / (60 * 24)) = food_disease_day {
-		point my_origin <- pen_origin;
-		loop j from: 0 to: 4 {
-			point t_loc <- my_origin + trough_locs[j];
-			create FoodDiseaseFactor number: 1 {
-				duration <- 7 * 24 * 60;
-				size <- 2.0;
-				location <- t_loc;
-			}
-		}
+		do contaminate_troughs;
 		food_disease_day <- -1;
 	}
 
@@ -605,6 +640,7 @@ species PigPen {
  */
 species FarmPig parent: DiseasePig {
 	int pen_id;
+	PigPen my_pen <- nil;
 	point pen_offset <- {0, 0};
 	bool food_disease_mode <- false;
 	string infection_source <- "none";
@@ -637,23 +673,27 @@ species FarmPig parent: DiseasePig {
 	}
 
 
-	// ==================== TROUGH INTERACTION ====================
+	// ==================== TROUGH INTERACTION (CACHED PER PEN) ====================
 
 	action eat {
-		ask PenTrough where (each.pen_id = self.pen_id) {
-			if (add_pig(myself)) {
-				myself.location <- location;
-				myself.current <- 3;
-				myself.duration <- myself.eat_time();
-				myself.eat_count <- myself.eat_count + 1;
-				break;
+		if (my_pen != nil) {
+			ask my_pen.my_troughs {
+				if (add_pig(myself)) {
+					myself.location <- location;
+					myself.current <- 3;
+					myself.duration <- myself.eat_time();
+					myself.eat_count <- myself.eat_count + 1;
+					break;
+				}
 			}
 		}
 	}
 
 	action go_out {
-		ask PenTrough where (each.pen_id = self.pen_id) {
-			do remove_pig(myself);
+		if (my_pen != nil) {
+			ask my_pen.my_troughs {
+				do remove_pig(myself);
+			}
 		}
 		location <- get_gate_out_loc();
 		current <- 4;
@@ -663,16 +703,16 @@ species FarmPig parent: DiseasePig {
 	// ==================== DISEASE BEHAVIOR OVERRIDES ====================
 
 	/**
-	 * Expose action: food disease transmission at troughs.
+	 * Expose action: food disease transmission at troughs (checks only this pen's cached factors).
 	 * Immune pigs (recover_count > 0) CANNOT be exposed again.
 	 */
 	action expose {
 		// Immunity check: if this pig has recovered before, it's immune
 		if (recover_count > 0) {
 			// Pig is immune — skip exposure
-		} else if (food_disease_mode and current = 3) {
-			ask FoodDiseaseFactor {
-				if (expose(myself)) {
+		} else if (food_disease_mode and current = 3 and my_pen != nil and !empty(my_pen.my_factors)) {
+			ask my_pen.my_factors {
+				if (!dead(self) and expose(myself)) {
 					myself.seir <- 1;
 					myself.infection_source <- "food";
 					myself.expose_count_per_day <- myself.expose_count_per_day + 1;
@@ -855,16 +895,10 @@ species Farmer {
 					victim.infection_source <- "farmer";
 					victim.expose_count_per_day <- victim.expose_count_per_day + 1;
 				}
-				// Contaminate troughs with food disease in this pen
+				// Contaminate troughs with food disease in this pen (reuses existing active factors if present)
 				cur_pen.pen_type <- "Food Disease";
-				point my_origin <- cur_pen.pen_origin;
-				loop j from: 0 to: 4 {
-					point t_loc <- my_origin + trough_locs[j];
-					create FoodDiseaseFactor number: 1 {
-						duration <- 7 * 24 * 60;
-						size <- 2.0;
-						location <- t_loc;
-					}
+				ask cur_pen {
+					do contaminate_troughs;
 				}
 			}
 		}
@@ -1008,9 +1042,10 @@ experiment TwoLayerFarm type: gui {
 			// Caretaker / Farmer agent
 			species Farmer aspect: macro;
 
-			// Partition walls between adjacent pens (same row only)
+			// Partition walls between adjacent pens (same row only — O(1) direct indexing)
 			graphics "partition_walls" {
 				int pen_count <- length(PEN_ORIGINS);
+				int total_pens <- length(PigPen);
 				loop i from: 0 to: pen_count - 2 {
 					int row_i <- int(i / PENS_PER_ROW);
 					int row_next <- int((i + 1) / PENS_PER_ROW);
@@ -1020,11 +1055,11 @@ experiment TwoLayerFarm type: gui {
 						float wall_y <- PEN_ORIGINS[i].y;
 
 						bool disease_active <- false;
-						loop pen over: PigPen {
-							if ((pen.pen_id = i + 1 or pen.pen_id = i + 2)
-								and (pen.exposed_count > 0 or pen.infected_count > 0)) {
-								disease_active <- true;
-							}
+						if (i + 1 < total_pens) {
+							PigPen p_left <- PigPen[i];
+							PigPen p_right <- PigPen[i + 1];
+							disease_active <- (p_left.exposed_count > 0 or p_left.infected_count > 0
+								or p_right.exposed_count > 0 or p_right.infected_count > 0);
 						}
 						rgb wall_color <- disease_active ? rgb(220, 70, 50) : rgb(110, 95, 75);
 						draw line([{wall_x, wall_y}, {wall_x, wall_y + PEN_HEIGHT}])
