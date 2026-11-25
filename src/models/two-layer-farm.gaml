@@ -95,6 +95,7 @@ global {
 
 	// ==================== FARM INITIALIZED FLAG ====================
 	bool farm_initialized <- false;
+	bool first_load_frame <- true;
 
 
 	// ==================== INITIALIZATION ====================
@@ -102,6 +103,7 @@ global {
 		// Auto-initialize with default parameters so all displays and charts have data at cycle 0.
 		// User can still change parameters on the left panel and click "Set Configuration" anytime.
 		do setup_farm;
+		first_load_frame <- true;
 	}
 
 
@@ -160,6 +162,11 @@ global {
 	 * Destroys all existing agents and re-creates the farm with current parameters.
 	 */
 	action setup_farm {
+		first_load_frame <- false;
+
+		// --- Enforce multi-pen requirement (2 to 50 pens) ---
+		NUM_PENS <- max(2, min(50, NUM_PENS));
+
 		// --- Validate Initial Infected Pen input before building farm ---
 		if (!validate_initial_infected_pen(true)) {
 			return;
@@ -407,6 +414,7 @@ global {
 	// ==================== CAMERA UPDATE ====================
 	// Resets dynamic flags so cameras unlock for manual mouse zoom & pan
 	reflex reset_camera_dynamic when: farm_initialized {
+		first_load_frame <- false;
 		if (overview_cam_dynamic) {
 			overview_cam_dynamic <- false;
 		}
@@ -926,7 +934,7 @@ species PenTrough parent: Trough {
 experiment TwoLayerFarm type: gui {
 
 	// ==================== PRE-SIMULATION PARAMETERS ====================
-	parameter "Number of Pens (1-50)" var: NUM_PENS min: 1 max: 50 init: 5 category: "Farm Setup" on_change: {
+	parameter "Number of Pens (2-50)" var: NUM_PENS min: 2 max: 50 init: 5 category: "Farm Setup" on_change: {
 		ask simulation {
 			if (length(initial_infected_pen_str) > 0) {
 				bool ok <- validate_initial_infected_pen(false);
@@ -945,7 +953,6 @@ experiment TwoLayerFarm type: gui {
 			bool ok <- validate_initial_infected_pen(false);
 		}
 	};
-
 	// ==================== SET CONFIGURATION BUTTON ====================
 	user_command "Set Configuration" {
 		ask simulation {
@@ -1026,37 +1033,40 @@ experiment TwoLayerFarm type: gui {
 				}
 			}
 
-			// Fixed top-left Overlay: responsive to window size (small split view to Full Screen) & independent of pen count/zoom
+			// Fixed top-left Overlay: responsive from small split-screen to Full Screen, 100% English
 			overlay position: {0, 0} size: {0, 0} transparency: 0.05 {
+				// At cycle 0 initial load, Display 0 is evaluated before the 50%x55% split sash is applied
+				float eff_px <- (first_load_frame and cycle = 0) ? (#px * 1.95) : #px;
 				float env_max <- max(ENV_WIDTH, ENV_HEIGHT);
-				float canvas_px <- env_max / max(0.0001, #px);
-				float aspect_fix <- (ENV_WIDTH > ENV_HEIGHT) ? min(1.5, (ENV_WIDTH / max(220.0, ENV_HEIGHT)) * 0.55) : 1.0;
-				float win_scale <- min(max(canvas_px / 700.0, 0.78), 1.40);
-				float s <- win_scale * aspect_fix;
+				float canvas_px <- env_max / max(0.0001, eff_px);
 
-				// Since TextDrawer multiplies font_pt by #px, using u = s * #px for all box geometry
+				// Responsive scale: compact (0.58x) in small split-screen so it never covers pens,
+				// scales up to 2.20x in Full Screen as requested
+				float s <- min(max(canvas_px / 445.0, 0.58), 2.20);
+
+				// Since TextDrawer multiplies font_pt by eff_px, using u = s * eff_px for all box geometry
 				// and s for all font sizes locks text and box at a 1:1 constant ratio (never overflows!)
-				float u <- s * #px;
+				float u <- s * eff_px;
 
 				float ox <- 8.0 * u;
 				float oy <- 8.0 * u;
-				float pw <- 292.0 * u;
-				float ph <- 148.0 * u;
+				float pw <- 288.0 * u;
+				float ph <- 142.0 * u;
 				float tx <- ox + 10.0 * u;
 
 				// Main card body + header bar + section dividers
 				draw rectangle(pw, ph) at: {ox + pw / 2.0, oy + ph / 2.0}
 					 color: rgb(20, 28, 22) border: rgb(95, 160, 95);
-				draw rectangle(pw, 26.0 * u) at: {ox + pw / 2.0, oy + 13.0 * u}
+				draw rectangle(pw, 25.0 * u) at: {ox + pw / 2.0, oy + 12.5 * u}
 					 color: rgb(35, 56, 38) border: rgb(95, 160, 95);
-				draw line([{ox + 8.0 * u, oy + 71.0 * u}, {ox + pw - 8.0 * u, oy + 71.0 * u}])
+				draw line([{ox + 8.0 * u, oy + 68.0 * u}, {ox + pw - 8.0 * u, oy + 68.0 * u}])
 					 color: rgb(65, 95, 68);
-				draw line([{ox + 8.0 * u, oy + 119.0 * u}, {ox + pw - 8.0 * u, oy + 119.0 * u}])
+				draw line([{ox + 8.0 * u, oy + 114.0 * u}, {ox + pw - 8.0 * u, oy + 114.0 * u}])
 					 color: rgb(65, 95, 68);
 
-				int f_head <- max(7, int(round(12.0 * s)));
-				int f_time <- max(7, int(round(11.5 * s)));
-				int f_body <- max(6, int(round(10.5 * s)));
+				int f_head <- max(6, int(round(11.5 * s)));
+				int f_time <- max(6, int(round(11.0 * s)));
+				int f_body <- max(5, int(round(10.0 * s)));
 
 				int days <- int(cycle / (24 * 60));
 				int hours <- (cycle / 60) mod 24;
@@ -1064,16 +1074,16 @@ experiment TwoLayerFarm type: gui {
 				string time_str <- (hours < 10 ? "0" : "") + hours + ":" + (mins < 10 ? "0" : "") + mins;
 
 				// Header title
-				draw "GIÁM SÁT TRANG TRẠI CHĂN NUÔI"
-					 at: {tx, oy + 13.5 * u} color: rgb(255, 215, 110)
+				draw "PIG FARM MONITORING SYSTEM"
+					 at: {tx, oy + 13.0 * u} color: rgb(255, 215, 110)
 					 font: font("Arial", f_head, #bold) anchor: #left_center;
 
 				// Section 1: Time & Farm Scale
-				draw "Thời gian : Ngày " + days + "   |   Giờ : " + time_str
-					 at: {tx, oy + 41.0 * u} color: rgb(245, 248, 242)
+				draw "Time      : Day " + days + "   |   Clock : " + time_str
+					 at: {tx, oy + 39.0 * u} color: rgb(245, 248, 242)
 					 font: font("Arial", f_time, #bold) anchor: #left_center;
-				draw "Quy mô    : " + length(PigPen) + " chuồng (" + length(FarmPig) + " con) - Lưới " + num_cols + "x" + num_rows
-					 at: {tx, oy + 58.0 * u} color: rgb(185, 215, 185)
+				draw "Scale     : " + length(PigPen) + " Pens (" + length(FarmPig) + " Pigs) - Grid " + num_cols + "x" + num_rows
+					 at: {tx, oy + 56.0 * u} color: rgb(185, 215, 185)
 					 font: font("Arial", f_body, #bold) anchor: #left_center;
 
 				// Section 2: Herd Health & Epidemic Summary
@@ -1082,27 +1092,27 @@ experiment TwoLayerFarm type: gui {
 				int total_r <- int(PigPen sum_of (each.recovered_count));
 				int total_s <- max(0, length(FarmPig) - total_e - total_i - total_r);
 
-				draw circle(3.2 * u) at: {tx + 3.5 * u, oy + 85.0 * u} color: rgb(100, 230, 120);
-				draw "Khỏe mạnh : " + total_s + " con   |   Đã khỏi : " + total_r + " con"
-					 at: {tx + 11.0 * u, oy + 85.0 * u} color: rgb(150, 235, 160)
+				draw circle(3.0 * u) at: {tx + 3.5 * u, oy + 82.0 * u} color: rgb(100, 230, 120);
+				draw "Healthy   : " + total_s + " pigs   |   Recovered : " + total_r + " pigs"
+					 at: {tx + 11.0 * u, oy + 82.0 * u} color: rgb(150, 235, 160)
 					 font: font("Arial", f_body, #bold) anchor: #left_center;
 
 				rgb sick_c <- (total_e + total_i > 0) ? rgb(255, 135, 80) : rgb(165, 180, 165);
-				draw circle(3.2 * u) at: {tx + 3.5 * u, oy + 104.0 * u} color: sick_c;
-				draw "Ủ bệnh (E): " + total_e + " con   |   Bệnh (I): " + total_i + " con"
-					 at: {tx + 11.0 * u, oy + 104.0 * u} color: sick_c
+				draw circle(3.0 * u) at: {tx + 3.5 * u, oy + 100.0 * u} color: sick_c;
+				draw "Exposed(E): " + total_e + " pigs   |   Infected(I): " + total_i + " pigs"
+					 at: {tx + 11.0 * u, oy + 100.0 * u} color: sick_c
 					 font: font("Arial", f_body, #bold) anchor: #left_center;
 
-				// Section 3: Caretaker / Farmer Status
+				// Section 3: Caretaker / Farmer Status -> Farmer : [Status] - [Current Pen]
 				if (length(Farmer) > 0) {
 					Farmer fm <- Farmer[0];
-					string fm_status <- fm.has_pathogen ? "MANG MẦM BỆNH" : "AN TOÀN";
+					string fm_status <- fm.has_pathogen ? "Pathogen Carrier" : "Normal";
 					rgb fm_color <- fm.has_pathogen ? rgb(255, 95, 85) : rgb(115, 235, 125);
 					int disp_pen <- (fm.current_pen_idx >= 0) ? (fm.current_pen_idx + 1) : 1;
 
-					draw circle(3.2 * u) at: {tx + 3.5 * u, oy + 133.0 * u} color: fm_color;
-					draw "Nông dân  : Chuồng " + disp_pen + " [" + fm_status + "]"
-						 at: {tx + 11.0 * u, oy + 133.0 * u} color: fm_color
+					draw circle(3.0 * u) at: {tx + 3.5 * u, oy + 128.0 * u} color: fm_color;
+					draw "Farmer    : [" + fm_status + "] - [Pen " + disp_pen + "]"
+						 at: {tx + 11.0 * u, oy + 128.0 * u} color: fm_color
 						 font: font("Arial", f_body, #bold) anchor: #left_center;
 				}
 			}
@@ -1173,13 +1183,13 @@ experiment TwoLayerFarm type: gui {
 				}
 			}
 
-			// Fixed top-left Detail Overlay: responsive to window size & independent of pen count/zoom
+			// Fixed top-left Detail Overlay: responsive from small split-screen to Full Screen, never overlaps Detail pen
 			overlay position: {0, 0} size: {0, 0} transparency: 0.05 {
 				float env_max <- max(ENV_WIDTH, ENV_HEIGHT);
 				float canvas_px <- env_max / max(0.0001, #px);
-				float aspect_fix <- (ENV_WIDTH > ENV_HEIGHT) ? min(1.5, (ENV_WIDTH / max(220.0, ENV_HEIGHT)) * 0.55) : 1.0;
-				float win_scale <- min(max(canvas_px / 700.0, 0.78), 1.40);
-				float s <- win_scale * aspect_fix;
+
+				// Responsive scale: compact (0.58x) in small split-screen, scales up to 2.20x in Full Screen
+				float s <- min(max(canvas_px / 445.0, 0.58), 2.20);
 
 				// Since TextDrawer multiplies font_pt by #px, using u = s * #px for all box geometry
 				// and s for all font sizes locks text and box at a 1:1 constant ratio (never overflows!)
@@ -1187,69 +1197,69 @@ experiment TwoLayerFarm type: gui {
 
 				float ox <- 8.0 * u;
 				float oy <- 8.0 * u;
-				float pw <- 285.0 * u;
-				float ph <- 148.0 * u;
+				float pw <- 280.0 * u;
+				float ph <- 142.0 * u;
 				float tx <- ox + 10.0 * u;
 
 				// Main card body + header bar + section dividers
 				draw rectangle(pw, ph) at: {ox + pw / 2.0, oy + ph / 2.0}
 					 color: rgb(18, 25, 34) border: rgb(235, 185, 65);
-				draw rectangle(pw, 26.0 * u) at: {ox + pw / 2.0, oy + 13.0 * u}
+				draw rectangle(pw, 25.0 * u) at: {ox + pw / 2.0, oy + 12.5 * u}
 					 color: rgb(32, 46, 64) border: rgb(235, 185, 65);
-				draw line([{ox + 8.0 * u, oy + 71.0 * u}, {ox + pw - 8.0 * u, oy + 71.0 * u}])
+				draw line([{ox + 8.0 * u, oy + 68.0 * u}, {ox + pw - 8.0 * u, oy + 68.0 * u}])
 					 color: rgb(65, 85, 110);
-				draw line([{ox + 8.0 * u, oy + 119.0 * u}, {ox + pw - 8.0 * u, oy + 119.0 * u}])
+				draw line([{ox + 8.0 * u, oy + 114.0 * u}, {ox + pw - 8.0 * u, oy + 114.0 * u}])
 					 color: rgb(65, 85, 110);
 
-				int f_head <- max(7, int(round(12.0 * s)));
-				int f_time <- max(7, int(round(11.5 * s)));
-				int f_body <- max(6, int(round(10.5 * s)));
+				int f_head <- max(6, int(round(11.5 * s)));
+				int f_time <- max(6, int(round(11.0 * s)));
+				int f_body <- max(5, int(round(10.0 * s)));
 
 				if (selected_pen != nil) {
 					PigPen sp <- PigPen(selected_pen);
 
 					// Header title
-					draw "THÔNG TIN CHI TIẾT - CHUỒNG " + sp.pen_id
-						 at: {tx, oy + 13.5 * u} color: rgb(255, 215, 110)
+					draw "PEN DETAIL MONITOR - PEN " + sp.pen_id
+						 at: {tx, oy + 13.0 * u} color: rgb(255, 215, 110)
 						 font: font("Arial", f_head, #bold) anchor: #left_center;
 
 					// Section 1: Pen Health Status & Time
 					bool has_active_disease <- (sp.exposed_count + sp.infected_count) > 0;
-					string status_txt <- has_active_disease ? "ĐANG CÓ DỊCH BỆNH" : (sp.pen_type = "Food Disease" ? "Ổ DỊCH KHỞI PHÁT" : "AN TOÀN (BÌNH THƯỜNG)");
+					string status_txt <- has_active_disease ? "INFECTED (ACTIVE DISEASE)" : (sp.pen_type = "Food Disease" ? "INITIAL OUTBREAK PEN" : "NORMAL (HEALTHY)");
 					rgb status_c <- has_active_disease ? rgb(255, 110, 85) : (sp.pen_type = "Food Disease" ? rgb(255, 180, 90) : rgb(120, 235, 135));
 
-					draw circle(3.2 * u) at: {tx + 3.5 * u, oy + 41.0 * u} color: status_c;
-					draw "Tình trạng: " + status_txt
-						 at: {tx + 11.0 * u, oy + 41.0 * u} color: status_c
+					draw circle(3.0 * u) at: {tx + 3.5 * u, oy + 39.0 * u} color: status_c;
+					draw "Status    : " + status_txt
+						 at: {tx + 11.0 * u, oy + 39.0 * u} color: status_c
 						 font: font("Arial", f_body, #bold) anchor: #left_center;
 
 					int d <- int(cycle / (24 * 60));
 					int h <- (cycle / 60) mod 24;
 					int m <- cycle mod 60;
-					draw "Thời gian : Ngày " + d + "   |   Giờ : " + (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m
-						 at: {tx, oy + 58.0 * u} color: rgb(230, 238, 248)
+					draw "Time      : Day " + d + "   |   Clock : " + (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m
+						 at: {tx, oy + 56.0 * u} color: rgb(230, 238, 248)
 						 font: font("Arial", f_time, #bold) anchor: #left_center;
 
 					// Section 2: Pig Count, Average Weight & Total Weight
 					float avg_w <- (sp.pig_count > 0) ? (sp.total_weight / sp.pig_count) : 0.0;
-					draw "Số lượng  : " + sp.pig_count + " con   |   TB : " + (avg_w with_precision 1) + " kg/con"
-						 at: {tx, oy + 85.0 * u} color: rgb(190, 215, 240)
+					draw "Herd Size : " + sp.pig_count + " pigs   |   Avg : " + (avg_w with_precision 1) + " kg/pig"
+						 at: {tx, oy + 82.0 * u} color: rgb(190, 215, 240)
 						 font: font("Arial", f_body, #bold) anchor: #left_center;
-					draw "Tổng trọng lượng đàn : " + (sp.total_weight with_precision 1) + " kg"
-						 at: {tx, oy + 104.0 * u} color: rgb(215, 228, 242)
+					draw "Total Pen Weight : " + (sp.total_weight with_precision 1) + " kg"
+						 at: {tx, oy + 100.0 * u} color: rgb(215, 228, 242)
 						 font: font("Arial", f_body, #bold) anchor: #left_center;
 
 					// Section 3: SEIR Breakdown in Pen
 					int healthy_in_pen <- max(0, sp.pig_count - sp.exposed_count - sp.infected_count - sp.recovered_count);
-					draw "Khỏe: " + healthy_in_pen + "  |  Ủ bệnh: " + sp.exposed_count + "  |  Bệnh: " + sp.infected_count + "  |  Khỏi: " + sp.recovered_count
-						 at: {tx, oy + 133.0 * u} color: rgb(255, 195, 115)
+					draw "Healthy: " + healthy_in_pen + "  |  Exposed: " + sp.exposed_count + "  |  Infected: " + sp.infected_count + "  |  Recovered: " + sp.recovered_count
+						 at: {tx, oy + 128.0 * u} color: rgb(255, 195, 115)
 						 font: font("Arial", f_body, #bold) anchor: #left_center;
 				} else {
-					draw "THÔNG TIN CHI TIẾT CHUỒNG"
-						 at: {tx, oy + 13.5 * u} color: rgb(255, 215, 110)
+					draw "PEN DETAIL MONITOR"
+						 at: {tx, oy + 13.0 * u} color: rgb(255, 215, 110)
 						 font: font("Arial", f_head, #bold) anchor: #left_center;
-					draw "Chưa chọn chuồng. Hãy click vào 1 chuồng bất kỳ."
-						 at: {tx, oy + 58.0 * u} color: rgb(160, 180, 200)
+					draw "No pen selected. Click any pen in Farm Overview."
+						 at: {tx, oy + 56.0 * u} color: rgb(160, 180, 200)
 						 font: font("Arial", f_body, #bold) anchor: #left_center;
 				}
 			}
